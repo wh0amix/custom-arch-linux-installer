@@ -1,4 +1,4 @@
-est-ce que ce script : #!/bin/bash
+#!/bin/bash
 
 LOGFILE="arch_install.log"
 exec > >(tee -a "$LOGFILE") 2>&1  # Redirige la sortie vers le log
@@ -31,7 +31,8 @@ VIRTUALBOX_SIZE="10G"
 SECURE_SIZE="10G"
 
 # Demande du disque cible
-DISK=$(lsblk -dpn -o NAME,SIZE | grep -E "/dev/sd|nvme|mmcblk" | dialog --stdout --menu "Sélectionnez le disque cible" 15 50 10 $(awk '{print $1, "(" $2 ")"}' ))
+echo "Veuillez entrer le nom du disque cible (par exemple, /dev/sda) :"
+read DISK
 if [[ -z "$DISK" ]]; then
     echo "Aucun disque sélectionné, arrêt du script."
     exit 1
@@ -145,52 +146,3 @@ cryptsetup close cryptroot
 
 # Fin du script
 echo "Installation terminée. Vous pouvez redémarrer votre machine."
-
-réponds à ca ? :Contexte
-Un collègue à vous cherche à utiliser Arch Linux. Cependant, il ne veut pas faire l'installation car il n'y connait
-rien. Il se tourne donc vers vous afin de l'installer pour lui. Problème : il rentre de vacances dans deux
-semaines et son ordinateur est avec lui.
-Vous vous savez pas disponible lors de son retour car vous êtes en vacances l'après-midi même de son
-retour !
-Par chance, vous lui avez demandé les spécificités de son ordinateur, ainsi que son futur usage...
-Objectif
-Réaliser un script d'installation qui vous permettra de discuter avec lui autour d'un café à son retour.
-Votre collègue vous à dit les choses suivantes:
-1. "Je serai le seul, avec mon fils, à utiliser la machine"
-2. "Mon fils s'en servira uniquement pour suivre des tutos de code en C. Apparemment, son professeur
-n'accepte pas qu'il utilise un IDE standard, t'y crois à ça ?!?"
-3. "Le disque dur est vieux et pas bien grand, il fait, à tout casser, 80G"
-4. "Niveau RAM, on est à l'aise avec un solide 8G"
-5. "Il est certain que je fasse de la virtualisation avec un hyperviseur style VirtualBox, pour des tests"
-6. "Il me faut impérativement un espace chiffré que je dois monter à la main, sait-on jamais ! [...] Un bon
-10G minimum ferait pas de mal, je pense."
-7. "Il y a un monde où j'aimerai tester Hyprland, ça a l'air chouette sur les forums de ricing ! Si tu pouvais
-m'ajouter une configuration customisée ça sera génial !"
-8. "Si tu as la capacité de m'ajouter un dossier partagé avec mon fils, ça serai top moumoute ! Pas
-énorme hein, genre 5G, histoire de se partager des memes ! C'est notre truc à nous ça."
-9. "Profites-en pour m'installer des outils que tu juges nécessaires, du simple navigateur internet aux
-outils de gestion de l'ordi, n'hésites pas à m'en mettre ! Ça me permettra de mettre les mains dans le
-cambouis, et avec tes recommandations, ça sera plus simple de te demander de l'aide !"
-10. "Si tu as besoin de mots de passe, pour les comptes ou les trucs chiffrés, t'embêtes pas met
-"azerty123", je modifierait ça plus tard."
-11. "Mon ordinateur ? Il a l'UEFI d'activé évidemment !"
-12. "Je garde rien sur le disque, c'est un single boot Arch qui m'intéresse !"
-1/29/2025 partiel.md
-/
-Consignes
-Vous l'avez compris, le but du partiel est d'automatiser une installation Arch avec les configurations
-demandées. Ça signifie qu'il vous faut rédiger un script.
-Voici les spécificités liés à la machine virtuelle à proprement parler :
-80G de stockage
-8G de RAM
-4/8 de cpus
-UEFI
-N'oubliez pas le combo LUKS + LVM qu'on a vu ensemble Appliquez le pour le disque. Les particularités
-de partitionnement sont donc les suivantes :
-Le disque est chiffré avec LVM
-Un volume logique dédié de 10Go doit être créé et configuré avec LUKS dessus, ainsi qu'un système
-de fichier en plus sans point de montage puisque monté par l'utilisateur à la main
-VirtualBox nécessite un espace de stockade dédié ⇒ volume logique (à vous de déterminer le point de
-montage)
-Pour le dossier partagé avec le fils ⇒ volume logique (à vous de déterminer le point de montage)
- 
