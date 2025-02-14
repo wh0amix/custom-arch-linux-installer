@@ -1,94 +1,122 @@
 #!/bin/bash
 
-LOGFILE="arch_install.log"
-exec > >(tee -a "$LOGFILE") 2>&1  # Redirige la sortie vers le log
+# Variables
+USERNAME="user"
+PASSWORD="azerty123"
+HOSTNAME="arch-machine"
+ROOT_PASSWORD="azerty123"
+LUKS_PASSWORD="azerty123"
+SWAP_SIZE="2G"
+ROOT_SIZE="20G"
+HOME_SIZE="30G"
+SHARED_SIZE="5G"
+VIRTUALBOX_SIZE="10G"
+SECURE_SIZE="10G"
 
-set -e  # Stoppe le script en cas d'erreur
+# Partitionnement du disque
+sgdisk -Z /dev/sda
+sgdisk -n 1:0:+512M -t 1:EF00 /dev/sda
+sgdisk -n 2:0:0 -t 2:8E00 /dev/sda
 
-# Vérification du mode root
-if [[ $EUID -ne 0 ]]; then
-    echo "Ce script doit être exécuté en tant que root."
-    exit 1
-fi
+# Formatage de la partition EFI
+mkfs.fat -F32 /dev/sda1
 
-# Vérification de la connexion Internet
-if ! ping -c 1 archlinux.org &> /dev/null; then
-    echo "Pas d'accès à Internet. Veuillez vous connecter avant de continuer."
-    exit 1
-fi
+# Chiffrement du disque
+echo -n "$LUKS_PASSWORD" | cryptsetup luksFormat --type luks2 /dev/sda2 -
+echo -n "$LUKS_PASSWORD" | cryptsetup open /dev/sda2 cryptroot
 
-# Demande du disque cible
-DISK=$(lsblk -dpn -o NAME,SIZE | grep -E "/dev/sd|nvme|mmcblk" | dialog --stdout --menu "Sélectionnez le disque cible" 15 50 10 $(awk '{print $1, "(" $2 ")"}' ))
-if [[ -z "$DISK" ]]; then
-    echo "Aucun disque sélectionné, arrêt du script."
-    exit 1
-fi
+# Création des volumes logiques
+pvcreate /dev/mapper/cryptroot
+vgcreate vg0 /dev/mapper/cryptroot
+lvcreate -L $SWAP_SIZE -n swap vg0
+lvcreate -L $ROOT_SIZE -n root vg0
+lvcreate -L $HOME_SIZE -n home vg0
+lvcreate -L $SHARED_SIZE -n shared vg0
+lvcreate -L $VIRTUALBOX_SIZE -n virtualbox vg0
+lvcreate -L $SECURE_SIZE -n secure vg0
 
-# Demande du mot de passe pour LUKS
-LUKS_PASS=$(dialog --stdout --insecure --passwordbox "Entrez un mot de passe pour le chiffrement LUKS" 10 50)
-if [[ -z "$LUKS_PASS" ]]; then
-    echo "Mot de passe LUKS non défini, arrêt du script."
-    exit 1
-fi
+# Formatage des volumes logiques
+mkfs.ext4 /dev/vg0/root
+mkfs.ext4 /dev/vg0/home
+mkfs.ext4 /dev/vg0/shared
+mkfs.ext4 /dev/vg0/virtualbox
+mkfs.ext4 /dev/vg0/secure
+mkswap /dev/vg0/swap
+swapon /dev/vg0/swap
 
-# Partitionnement et chiffrement du disque
-echo "Partitionnement et formatage du disque..."
-wipefs --all --force "$DISK"
-parted -s "$DISK" mklabel gpt
-parted -s "$DISK" mkpart ESP fat32 1MiB 512MiB
-parted -s "$DISK" set 1 esp on
-parted -s "$DISK" mkpart primary 512MiB 100%
+# Montage des systèmes de fichiers
+mount /dev/vg0/root /mnt
+mkdir /mnt/home
+mkdir /mnt/shared
+mkdir /mnt/virtualbox
+mkdir /mnt/secure
+mount /dev/vg0/home /mnt/home
+mount /dev/vg0/shared /mnt/shared
+mount /dev/vg0/virtualbox /mnt/virtualbox
+mount /dev/vg0/secure /mnt/secure
+mkdir /mnt/boot
+mount /dev/sda1 /mnt/boot
 
-# Formatage et chiffrement
-ESP_PART="${DISK}1"
-ROOT_PART="${DISK}2"
-echo -n "$LUKS_PASS" | cryptsetup luksFormat "$ROOT_PART"
-echo -n "$LUKS_PASS" | cryptsetup open "$ROOT_PART" cryptroot
-mkfs.fat -F32 "$ESP_PART"
-mkfs.ext4 /dev/mapper/cryptroot
+# Installation des paquets de base
+pacstrap /mnt base linux linux-firmware
 
-# Montage des partitions
-mount /dev/mapper/cryptroot /mnt
-mkdir -p /mnt/boot
-mount "$ESP_PART" /mnt/boot
-
-# Installation de base
-echo "Installation de base d'Arch Linux..."
-pacstrap /mnt base linux linux-firmware vim grub efibootmgr lvm2 dialog networkmanager
-
-# Génération du fstab
+# Génération du fichier fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# Configuration système
+# Configuration du système
 arch-chroot /mnt /bin/bash <<EOF
-echo "Configuration du système..."
-
-# Localisation
-echo "LANG=fr_FR.UTF-8" > /etc/locale.conf
-sed -i 's/#fr_FR.UTF-8/fr_FR.UTF-8/' /etc/locale.gen
-locale-gen
 ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
 hwclock --systohc
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+echo "$HOSTNAME" > /etc/hostname
+echo "127.0.0.1 localhost" >> /etc/hosts
+echo "::1 localhost" >> /etc/hosts
+echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
 
-# Nom de l'hôte
-echo "archlinux" > /etc/hostname
-echo "127.0.1.1 archlinux" >> /etc/hosts
+# Configuration de mkinitcpio
+sed -i 's/HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
+mkinitcpio -P
 
-# Installation et configuration de GRUB
-echo "Installation de GRUB..."
+# Configuration de GRUB
+pacman -S grub efibootmgr
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-echo 'GRUB_CMDLINE_LINUX="cryptdevice=/dev/disk/by-uuid/$(blkid -s UUID -o value $ROOT_PART):cryptroot root=/dev/mapper/cryptroot"' >> /etc/default/grub
 grub-mkconfig -o /boot/grub/grub.cfg
 
-# Activation des services
-systemctl enable NetworkManager
+# Configuration du mot de passe root
+echo "root:$ROOT_PASSWORD" | chpasswd
 
 # Création de l'utilisateur
-useradd -m -G wheel -s /bin/bash user
-echo "user:password" | chpasswd
-sed -i 's/# %wheel ALL=(ALL) ALL/ %wheel ALL=(ALL) ALL/' /etc/sudoers
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$PASSWORD" | chpasswd
+
+# Installation de sudo
+pacman -S sudo
+sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+
+# Installation des outils et environnements demandés
+pacman -S virtualbox virtualbox-host-dkms gcc make base-devel git vim firefox
+
+# Configuration de Hyprland
+sudo -u $USERNAME git clone https://github.com/hyprwm/Hyprland.git /home/$USERNAME/Hyprland
+sudo -u $USERNAME mkdir -p /home/$USERNAME/.config/hypr
+sudo -u $USERNAME cp /home/$USERNAME/Hyprland/configs/example.conf /home/$USERNAME/.config/hypr/hyprland.conf
+
+# Configuration des permissions pour le volume sécurisé
+chown $USERNAME:$USERNAME /mnt/secure
+chmod 700 /mnt/secure
+
+# Configuration des permissions pour le dossier partagé
+chown $USERNAME:$USERNAME /mnt/shared
+chmod 770 /mnt/shared
+
 EOF
 
-# Fin de l'installation
-echo "Installation terminée ! Vous pouvez redémarrer."
-dialog --msgbox "Installation terminée avec succès !\nVous pouvez redémarrer votre machine." 10 50
+# Démonter les systèmes de fichiers
+umount -R /mnt
+swapoff /dev/vg0/swap
+cryptsetup close cryptroot
+
+# Fin du script
+echo "Installation terminée. Vous pouvez redémarrer votre machine."
