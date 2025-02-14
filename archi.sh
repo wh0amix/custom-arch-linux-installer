@@ -1,88 +1,112 @@
 #!/bin/bash
 
-set -e  # Arrêter le script en cas d'erreur
-
 # Variables
 DISK="/dev/sda"
-CRYPT_NAME="cryptdisk"
-VG_NAME="volgroup"
-LV_ROOT="root"
-LV_VBOX="vbox"
-LV_SHARED="shared"
-LV_ENCRYPTED="encrypted"
+HOSTNAME="archlinux"
+USER1="collegue"
+USER2="fils"
 PASSWORD="azerty123"
-HOSTNAME="coworker-pc"
-USER1="coworker"
-USER2="son"
+LUKS_PART="/dev/sda3"
+LUKS_MAPPER="cryptlvm"
+VG_NAME="vg0"
+LV_ROOT="lv_root"
+LV_SHARED="lv_shared"
+LV_VIRTUALBOX="lv_virtualbox"
+LV_CRYPT="lv_crypt"
+TIMEZONE="Europe/Paris"
+LOCALE="fr_FR.UTF-8"
 
-echo "====> Configuration du disque et chiffrement avec LUKS..."
-# Création des partitions
-parted -s ${DISK} mklabel gpt
-parted -s ${DISK} mkpart ESP fat32 1MiB 512MiB
-parted -s ${DISK} set 1 esp on
-parted -s ${DISK} mkpart primary 512MiB 100%
+# Partitionnement
+echo "Partitionnement du disque..."
+parted -s $DISK mklabel gpt
+parted -s $DISK mkpart primary fat32 1MiB 513MiB
+parted -s $DISK set 1 esp on
+parted -s $DISK mkpart primary ext4 513MiB 20GiB
+parted -s $DISK mkpart primary 20GiB 30GiB
+parted -s $DISK mkpart primary 30GiB 35GiB
+parted -s $DISK mkpart primary 35GiB 100%
 
-# Formater et configurer LUKS
-mkfs.fat -F32 ${DISK}1
-echo -n "${PASSWORD}" | cryptsetup luksFormat ${DISK}2 -
-echo -n "${PASSWORD}" | cryptsetup open ${DISK}2 ${CRYPT_NAME} --key-file=-
+# Chiffrement LUKS
+echo "Configuration de LUKS..."
+cryptsetup luksFormat $LUKS_PART
+cryptsetup open $LUKS_PART $LUKS_MAPPER
 
-# Configuration de LVM
-pvcreate /dev/mapper/${CRYPT_NAME}
-vgcreate ${VG_NAME} /dev/mapper/${CRYPT_NAME}
-lvcreate -L 10G -n ${LV_ENCRYPTED} ${VG_NAME}
-lvcreate -L 20G -n ${LV_VBOX} ${VG_NAME}
-lvcreate -L 5G -n ${LV_SHARED} ${VG_NAME}
-lvcreate -l 100%FREE -n ${LV_ROOT} ${VG_NAME}
+# LVM
+echo "Configuration de LVM..."
+pvcreate /dev/mapper/$LUKS_MAPPER
+vgcreate $VG_NAME /dev/mapper/$LUKS_MAPPER
+lvcreate -L 40G -n $LV_ROOT $VG_NAME
+lvcreate -L 5G -n $LV_SHARED $VG_NAME
+lvcreate -L 10G -n $LV_VIRTUALBOX $VG_NAME
+lvcreate -L 10G -n $LV_CRYPT $VG_NAME
 
-# Formater les volumes logiques
-mkfs.ext4 /dev/${VG_NAME}/${LV_ROOT}
-mkfs.ext4 /dev/${VG_NAME}/${LV_VBOX}
-mkfs.ext4 /dev/${VG_NAME}/${LV_SHARED}
-mkfs.ext4 /dev/${VG_NAME}/${LV_ENCRYPTED}
+# Formatage
+echo "Formatage des partitions..."
+mkfs.fat -F32 /dev/sda1
+mkfs.ext4 /dev/$VG_NAME/$LV_ROOT
+mkfs.ext4 /dev/$VG_NAME/$LV_SHARED
+mkfs.ext4 /dev/$VG_NAME/$LV_VIRTUALBOX
+mkfs.ext4 /dev/$VG_NAME/$LV_CRYPT
 
-# Montage des partitions
-mount /dev/${VG_NAME}/${LV_ROOT} /mnt
-mkdir -p /mnt/boot/efi /mnt/vbox /mnt/shared
-mount ${DISK}1 /mnt/boot/efi
-mount /dev/${VG_NAME}/${LV_VBOX} /mnt/vbox
-mount /dev/${VG_NAME}/${LV_SHARED} /mnt/shared
+# Montage
+echo "Montage des partitions..."
+mount /dev/$VG_NAME/$LV_ROOT /mnt
+mkdir /mnt/boot
+mount /dev/sda1 /mnt/boot
+mkdir /mnt/shared
+mount /dev/$VG_NAME/$LV_SHARED /mnt/shared
+mkdir /mnt/virtualbox
+mount /dev/$VG_NAME/$LV_VIRTUALBOX /mnt/virtualbox
 
-echo "====> Installation des paquets de base..."
-pacstrap /mnt base base-devel linux linux-firmware vim grub efibootmgr lvm2
+# Installation des paquets de base
+echo "Installation des paquets de base..."
+pacstrap /mnt base linux linux-firmware vim networkmanager grub efibootmgr lvm2
 
-echo "====> Configuration du système..."
+# Génération de fstab
+echo "Génération de fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 
-arch-chroot /mnt /bin/bash <<EOF
-# Configuration de base
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
-locale-gen
-ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
-hwclock --systohc
-echo "${HOSTNAME}" > /etc/hostname
+# Configuration système
+echo "Configuration du système..."
+arch-chroot /mnt ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+arch-chroot /mnt hwclock --systohc
+arch-chroot /mnt sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+arch-chroot /mnt locale-gen
+arch-chroot /mnt echo "LANG=$LOCALE" > /etc/locale.conf
+arch-chroot /mnt echo $HOSTNAME > /etc/hostname
+arch-chroot /mnt echo "127.0.0.1 localhost" >> /etc/hosts
+arch-chroot /mnt echo "::1       localhost" >> /etc/hosts
+arch-chroot /mnt echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
 
-# Configuration de GRUB
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block keymap encrypt lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -P
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=arch
-grub-mkconfig -o /boot/grub/grub.cfg
+# Bootloader
+echo "Installation du bootloader..."
+arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
-# Création des utilisateurs
-useradd -m -G wheel ${USER1}
-echo "${USER1}:${PASSWORD}" | chpasswd
-useradd -m ${USER2}
-echo "${USER2}:${PASSWORD}" | chpasswd
-echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+# Utilisateurs
+echo "Création des utilisateurs..."
+arch-chroot /mnt useradd -m -G wheel -s /bin/bash $USER1
+arch-chroot /mnt useradd -m -s /bin/bash $USER2
+arch-chroot /mnt echo "$USER1:$PASSWORD" | chpasswd
+arch-chroot /mnt echo "$USER2:$PASSWORD" | chpasswd
 
-# Installation des logiciels
-pacman -S --noconfirm hyprland gdm virtualbox virtualbox-host-modules-arch firefox xterm neofetch
+# Outils supplémentaires
+echo "Installation des outils supplémentaires..."
+arch-chroot /mnt pacman -S --noconfirm xorg-server xorg-xinit hyprland virtualbox firefox code
 
-# Activation des services
-systemctl enable gdm.service
-EOF
+# Configuration de Hyprland
+echo "Configuration de Hyprland..."
+mkdir -p /mnt/home/$USER1/.config/hypr
+echo "exec Hyprland" > /mnt/home/$USER1/.config/hypr/hyprland.conf
 
-echo "====> Fin de l'installation, redémarrage..."
+# Dossier partagé
+echo "Configuration du dossier partagé..."
+chown $USER1:$USER1 /mnt/shared
+chmod 770 /mnt/shared
+
+# Finalisation
+echo "Finalisation..."
 umount -R /mnt
+echo "Installation terminée ! Redémarrage dans 5 secondes..."
+sleep 5
 reboot
