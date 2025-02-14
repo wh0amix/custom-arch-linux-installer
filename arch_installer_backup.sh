@@ -1,94 +1,115 @@
 #!/bin/bash
 
-LOGFILE="arch_install.log"
-exec > >(tee -a "$LOGFILE") 2>&1  # Redirige la sortie vers le log
+# Variables
+LUKS_PASS="azerty123"
+LVM_VG="volgroup"
+LVM_LV_SIZE="10G"
+LVM_VBOX_SIZE="20G"
+LVM_SHARED_SIZE="5G"
+ROOT_MOUNT="/mnt"
+EFI_PARTITION="/dev/sda1"
+DISK="/dev/sda"
+MOUNT_LVM="/mnt/lvm"
+HYPRLAND_CONF="/mnt/home/coworker/.config/hyprland"
 
-set -e  # Stoppe le script en cas d'erreur
+# Fonction pour créer et chiffrer le disque
+encrypt_disk() {
+    echo -n "$LUKS_PASS" | cryptsetup luksFormat $DISK
+    echo -n "$LUKS_PASS" | cryptsetup open $DISK cryptdisk
+}
 
-# Vérification du mode root
-if [[ $EUID -ne 0 ]]; then
-    echo "Ce script doit être exécuté en tant que root."
-    exit 1
-fi
+# Fonction pour créer LVM
+create_lvm() {
+    pvcreate /dev/mapper/cryptdisk
+    vgcreate $LVM_VG /dev/mapper/cryptdisk
 
-# Vérification de la connexion Internet
-if ! ping -c 1 archlinux.org &> /dev/null; then
-    echo "Pas d'accès à Internet. Veuillez vous connecter avant de continuer."
-    exit 1
-fi
+    # Création des volumes logiques
+    lvcreate -L $LVM_LV_SIZE -n root $LVM_VG
+    lvcreate -L $LVM_VBOX_SIZE -n vbox $LVM_VG
+    lvcreate -L $LVM_SHARED_SIZE -n shared $LVM_VG
+}
 
-# Demande du disque cible
-DISK=$(lsblk -dpn -o NAME,SIZE | grep -E "/dev/sd|nvme|mmcblk" | dialog --stdout --menu "Sélectionnez le disque cible" 15 50 10 $(awk '{print $1, "(" $2 ")"}' ))
-if [[ -z "$DISK" ]]; then
-    echo "Aucun disque sélectionné, arrêt du script."
-    exit 1
-fi
-
-# Demande du mot de passe pour LUKS
-LUKS_PASS=$(dialog --stdout --insecure --passwordbox "Entrez un mot de passe pour le chiffrement LUKS" 10 50)
-if [[ -z "$LUKS_PASS" ]]; then
-    echo "Mot de passe LUKS non défini, arrêt du script."
-    exit 1
-fi
-
-# Partitionnement et chiffrement du disque
-echo "Partitionnement et formatage du disque..."
-wipefs --all --force "$DISK"
-parted -s "$DISK" mklabel gpt
-parted -s "$DISK" mkpart ESP fat32 1MiB 512MiB
-parted -s "$DISK" set 1 esp on
-parted -s "$DISK" mkpart primary 512MiB 100%
-
-# Formatage et chiffrement
-ESP_PART="${DISK}1"
-ROOT_PART="${DISK}2"
-echo -n "$LUKS_PASS" | cryptsetup luksFormat "$ROOT_PART"
-echo -n "$LUKS_PASS" | cryptsetup open "$ROOT_PART" cryptroot
-mkfs.fat -F32 "$ESP_PART"
-mkfs.ext4 /dev/mapper/cryptroot
+# Fonction pour partitionner et formater
+partition_and_format() {
+    # Création des partitions EFI et LVM
+    mkfs.fat -F32 $EFI_PARTITION
+    mkfs.ext4 /dev/$LVM_VG/root
+    mkfs.ext4 /dev/$LVM_VG/vbox
+    mkfs.ext4 /dev/$LVM_VG/shared
+}
 
 # Montage des partitions
-mount /dev/mapper/cryptroot /mnt
-mkdir -p /mnt/boot
-mount "$ESP_PART" /mnt/boot
+mount_partitions() {
+    mount /dev/$LVM_VG/root $ROOT_MOUNT
+    mkdir -p $ROOT_MOUNT/boot/efi
+    mount $EFI_PARTITION $ROOT_MOUNT/boot/efi
+}
 
 # Installation de base
-echo "Installation de base d'Arch Linux..."
-pacstrap /mnt base linux linux-firmware vim grub efibootmgr lvm2 dialog networkmanager
+install_base() {
+    pacstrap $ROOT_MOUNT base base-devel linux linux-firmware vim grub efibootmgr lvm2
+}
 
-# Génération du fstab
-genfstab -U /mnt >> /mnt/etc/fstab
+# Configuration du système
+configure_system() {
+    genfstab -U $ROOT_MOUNT >> $ROOT_MOUNT/etc/fstab
 
-# Configuration système
-arch-chroot /mnt /bin/bash <<EOF
-echo "Configuration du système..."
+    # Chroot dans l'environnement
+    arch-chroot $ROOT_MOUNT /bin/bash <<EOF
+    # Configuration du fuseau horaire
+    ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
+    hwclock --systohc
 
-# Localisation
-echo "LANG=fr_FR.UTF-8" > /etc/locale.conf
-sed -i 's/#fr_FR.UTF-8/fr_FR.UTF-8/' /etc/locale.gen
-locale-gen
-ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
-hwclock --systohc
+    # Configuration des locales
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+    locale-gen
+    echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
-# Nom de l'hôte
-echo "archlinux" > /etc/hostname
-echo "127.0.1.1 archlinux" >> /etc/hosts
+    # Configuration du hostname
+    echo "coworker-pc" > /etc/hostname
+    EOF
+}
 
-# Installation et configuration de GRUB
-echo "Installation de GRUB..."
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-echo 'GRUB_CMDLINE_LINUX="cryptdevice=/dev/disk/by-uuid/$(blkid -s UUID -o value $ROOT_PART):cryptroot root=/dev/mapper/cryptroot"' >> /etc/default/grub
-grub-mkconfig -o /boot/grub/grub.cfg
+# Installation de GRUB et configuration du boot
+install_grub() {
+    arch-chroot $ROOT_MOUNT grub-install --target=x86_64-efi --efi-directory=$ROOT_MOUNT/boot/efi --bootloader-id=arch
+    arch-chroot $ROOT_MOUNT grub-mkconfig -o /boot/grub/grub.cfg
+}
 
-# Activation des services
-systemctl enable NetworkManager
+# Installation de Hyprland, VirtualBox et autres logiciels
+install_software() {
+    arch-chroot $ROOT_MOUNT pacman -S --noconfirm hyprland virtualbox virtualbox-host-modules-arch firefox xterm
+    arch-chroot $ROOT_MOUNT systemctl enable display-manager
+}
 
-# Création de l'utilisateur
-useradd -m -G wheel -s /bin/bash user
-echo "user:password" | chpasswd
-sed -i 's/# %wheel ALL=(ALL) ALL/ %wheel ALL=(ALL) ALL/' /etc/sudoers
-EOF
+# Configuration de l'utilisateur
+configure_user() {
+    arch-chroot $ROOT_MOUNT useradd -m coworker
+    echo "coworker:$LUKS_PASS" | chpasswd
+    arch-chroot $ROOT_MOUNT useradd -m son
+    echo "son:$LUKS_PASS" | chpasswd
 
-# Fin de l'installation
-echo "Installation terminée ! Vous pouvez redémarrer."
-dialog --msgbox "Installation terminée avec succès !\nVous pouvez redémarrer votre machine." 10 50
+    # Créer les dossiers partagés
+    mkdir -p $ROOT_MOUNT/home/coworker/shared
+    mkdir -p $ROOT_MOUNT/home/son/shared
+    chmod 777 $ROOT_MOUNT/home/coworker/shared
+    chmod 777 $ROOT_MOUNT/home/son/shared
+}
+
+# Script principal
+main() {
+    # Initialisation
+    encrypt_disk
+    create_lvm
+    partition_and_format
+    mount_partitions
+    install_base
+    configure_system
+    install_grub
+    install_software
+    configure_user
+
+    echo "Installation terminée. Vous pouvez maintenant configurer et utiliser le système."
+}
+
+main
